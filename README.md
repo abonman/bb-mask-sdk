@@ -2,7 +2,7 @@
 
 Türkçe hukuki metindeki kişisel veriyi etiketler, model cevabındaki etiketleri geri açar. Paket ince bir HTTP istemcisidir. Model çağırmaz, metin yazdırmaz, bekletmez.
 
-Müşteri panelden `bb_test_` anahtarı alır. Kendi backend’i bu paketi kurar ve anahtarı `init`’e verir. LLM satırı müşterinindir; SDK’nın öncesine `anonymize`, sonrasına `restore` konur.
+Müşteri Data Mask konsolundan `dm_test_` anahtarı alır. Kendi backend’i bu paketi kurar ve anahtarı `init`’e verir. LLM satırı müşterinindir; SDK’nın öncesine `anonymize`, sonrasına `restore` konur.
 
 ```python
 import os
@@ -36,7 +36,7 @@ pip install -e .
 Anahtarı koda veya repoya yazmayın. Ortam değişkeni veya kendi ayar dosyanız yeter.
 
 ```bash
-export BB_ANONYM_TOKEN="bb_test_..."
+export BB_ANONYM_TOKEN="dm_test_..."
 ```
 
 `init` süreçte bir kez çalışır. Model çağrısı değildir. Modül fonksiyonları (`bb_mask.anonymize` ve diğerleri) bundan önce çağrılırsa `BBError(401)` verir ve servise gitmez.
@@ -51,7 +51,7 @@ istemci = bb_mask.init(
 
 | Argüman | Tip | Anlam |
 |---|---|---|
-| `api_key` | `str` | Paneldeki `bb_test_` anahtarı. Boşsa `BBError(401)`. |
+| `api_key` | `str` | Konsoldaki `dm_test_` anahtarı. Boşsa `BBError(401)`. |
 | `base_url` | `str` | Servis adresi. Varsayılan `http://127.0.0.1:8081`. |
 | `timeout` | `float` | HTTP zaman aşımı, saniye. Varsayılan `120`. |
 
