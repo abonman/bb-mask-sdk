@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import quote
 
 import httpx
 
@@ -20,10 +21,11 @@ _KURGU0 = "Bu uç henüz açık değil."
 
 
 class BBError(RuntimeError):
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, request_id: str | None = None):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.request_id = request_id
 
 
 @dataclass
@@ -31,6 +33,9 @@ class Tagged:
     text: str
     doc_id: str | None = None
     state: dict | None = None
+    entities_found: dict = field(default_factory=dict)
+    balance_credits: str | None = None
+    request_id: str | None = None
 
 
 class BBAnonym:
@@ -42,7 +47,17 @@ class BBAnonym:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}"}
 
+    def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                return client.request(method, f"{self.base_url}{path}", headers=self._headers(), **kwargs)
+        except httpx.TimeoutException as exc:
+            raise BBError(504, f"Zaman aşımı ({self.timeout} sn). Ücret düşmüş olabilir.") from exc
+        except httpx.HTTPError as exc:
+            raise BBError(503, f"Servise ulaşılamadı ({self.base_url})") from exc
+
     def _parse(self, response: httpx.Response) -> dict:
+        request_id = response.headers.get("x-request-id")
         if response.status_code >= 400:
             detail = response.text
             try:
@@ -51,32 +66,39 @@ class BBAnonym:
                     detail = str(body["detail"])
             except Exception:
                 pass
-            raise BBError(response.status_code, detail)
-        return response.json()
+            raise BBError(response.status_code, detail, request_id)
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise BBError(502, "Servis JSON dönmedi", request_id) from exc
+        if isinstance(body, dict):
+            body["_request_id"] = request_id
+        return body
 
     def _tagged(self, body: dict, persist: bool) -> Tagged:
         doc_id = body.get("doc_id") or None
         if not persist:
             doc_id = None
-        return Tagged(text=body.get("text") or "", doc_id=doc_id, state=body.get("state"))
+        return Tagged(
+            text=body.get("text") or "",
+            doc_id=doc_id,
+            state=body.get("state"),
+            entities_found=body.get("entities_found") or {},
+            balance_credits=body.get("balance_credits"),
+            request_id=body.get("_request_id"),
+        )
 
     def anonymize(self, text: str, persist: bool = True) -> Tagged:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(
-                f"{self.base_url}/v1/anonymize",
-                headers={**self._headers(), "Content-Type": "application/json"},
-                json={"text": text, "persist": persist},
-            )
+        response = self._send("POST", "/v1/anonymize", json={"text": text, "persist": persist})
         return self._tagged(self._parse(response), persist)
 
     def anonymize_file(self, filename: str, content: bytes, persist: bool = True) -> Tagged:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(
-                f"{self.base_url}/v1/anonymize/file",
-                headers=self._headers(),
-                data={"persist": str(persist).lower()},
-                files={"file": (filename, content, "application/octet-stream")},
-            )
+        response = self._send(
+            "POST",
+            "/v1/anonymize/file",
+            data={"persist": str(persist).lower()},
+            files={"file": (filename, content, "application/octet-stream")},
+        )
         return self._tagged(self._parse(response), persist)
 
     def anonymize_path(self, path: str | Path, persist: bool = True) -> Tagged:
@@ -90,13 +112,12 @@ class BBAnonym:
         for path in paths:
             file_path = Path(path)
             files.append(("files", (file_path.name, file_path.read_bytes(), "application/octet-stream")))
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(
-                f"{self.base_url}/v1/anonymize/documents",
-                headers=self._headers(),
-                data={"persist": str(persist).lower()},
-                files=files,
-            )
+        response = self._send(
+            "POST",
+            "/v1/anonymize/documents",
+            data={"persist": str(persist).lower()},
+            files=files,
+        )
         return self._tagged(self._parse(response), persist)
 
     def restore(self, doc_id_or_state: str | dict, model_text: str) -> str:
@@ -105,29 +126,15 @@ class BBAnonym:
             payload["state"] = doc_id_or_state
         else:
             payload["doc_id"] = doc_id_or_state
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(
-                f"{self.base_url}/v1/restore",
-                headers={**self._headers(), "Content-Type": "application/json"},
-                json=payload,
-            )
+        response = self._send("POST", "/v1/restore", json=payload)
         return self._parse(response).get("text") or ""
 
     def get_map(self, doc_id: str, once: bool = False) -> dict:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.get(
-                f"{self.base_url}/v1/mappings/{doc_id}",
-                headers=self._headers(),
-                params={"once": str(once).lower()},
-            )
+        response = self._send("GET", f"/v1/mappings/{quote(doc_id, safe='')}", params={"once": str(once).lower()})
         return self._parse(response).get("state") or {}
 
     def delete(self, doc_id: str) -> bool:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.delete(
-                f"{self.base_url}/v1/mappings/{doc_id}",
-                headers=self._headers(),
-            )
+        response = self._send("DELETE", f"/v1/mappings/{quote(doc_id, safe='')}")
         return bool(self._parse(response).get("deleted"))
 
     def complete(self, text: str) -> str:

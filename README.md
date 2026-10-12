@@ -72,8 +72,11 @@ diger = bb_mask.BBAnonym("http://127.0.0.1:8081", token, timeout=120)
 | Alan | Tip | Ne zaman dolu |
 |---|---|---|
 | `text` | `str` | Her zaman. Kişisel veri yerine etiket vardır: `<PERSON_0>`, `<TR_NATIONAL_ID_0>`. |
-| `doc_id` | `str \| None` | `persist=True` (varsayılan). Haritanın servisteki anahtarı. |
+| `doc_id` | `str \| None` | `persist=True` (varsayılan). Haritanın servisteki anahtarı. Yalnız aynı çalışma alanının anahtarı açar. |
 | `state` | `dict \| None` | `persist=False`. Haritanın kendisi. Servise yazılmaz. |
+| `entities_found` | `dict[str, int]` | Her zaman. Tip başına sayı: `{"PERSON": 2}`. Düz isim taşımaz. |
+| `balance_credits` | `str \| None` | Çağrıdan sonra kalan bakiye: `"9.00"`. |
+| `request_id` | `str \| None` | Yanıtın `X-Request-Id` değeri. Konsoldaki Kullanım satırıyla eşleşir. |
 
 ```python
 tagged = bb_mask.anonymize("Davacı Hasan Demirkol, TC 62601815964")
@@ -99,16 +102,21 @@ Sözlük düz isim taşır. Loga, bilete veya modele koymayın. `restore` bu sö
 
 ### `BBError`
 
-`RuntimeError` alt sınıfı. `status_code: int`, `detail: str`. `str(hata)` ayrıntı metnidir.
+`RuntimeError` alt sınıfı. `status_code: int`, `detail: str`, `request_id: str | None`. `str(hata)` ayrıntı metnidir. `request_id` servisten yanıt geldiyse doludur; destek isterken bu değeri iletin.
+
+Ağ hatası da `BBError` olur; `httpx` istisnası dışarı sızmaz.
 
 | Kod | Anlam |
 |---|---|
 | 400 | Boş metin, 1–3 dışı dosya sayısı, oturumda anonymize yok, `doc_id` ve `state` ikisi de yok. |
 | 401 | `init` çağrılmadı, anahtar boş veya tanınmıyor. |
 | 402 | Bakiye yok. Anonimleştirme servise gitmez. |
-| 404 | Harita yok. Silinmiş, `once=True` ile okunmuş veya servis tutmuyordur. |
+| 404 | Harita yok. Silinmiş, `once=True` ile okunmuş, başka çalışma alanının veya servis tutmuyordur. |
 | 413 | Dosya 20 MB üstü. |
 | 501 | `complete` ailesi. Bu uç henüz açık değil. |
+| 502 | Motor hata verdi; anonymize ücreti iade edilir. Yanıt JSON değilse de 502 olur. |
+| 503 | Servise ulaşılamadı. İstek gitmedi. |
+| 504 | `timeout` doldu. İstek servise ulaşmış olabilir; ücret düşmüş olabilir. Konsoldaki Kullanım sayfasına bakın. |
 
 Ücret başarılı anonymize çağrısında düşer. Servis hata verirse ücret geri yazılır. `restore`, `get_map` ve `delete` ücret yazmaz.
 

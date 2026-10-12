@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bb-mask"
-version = "0.1.0"
+version = "0.2.0"
 description = "bb_mask istemcisi. anonymize ve restore; model çağrısı yok."
 readme = "README.md"
 license = {text = "MIT"}
