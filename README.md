@@ -77,6 +77,10 @@ diger = bb_mask.BBAnonym("http://127.0.0.1:8081", token, timeout=120)
 | `entities_found` | `dict[str, int]` | Her zaman. Tip başına sayı: `{"PERSON": 2}`. Düz isim taşımaz. |
 | `balance_credits` | `str \| None` | Çağrıdan sonra kalan bakiye: `"9.00"`. |
 | `request_id` | `str \| None` | Yanıtın `X-Request-Id` değeri. Konsoldaki Kullanım satırıyla eşleşir. |
+| `placeholder_style` | `str` | Uygulanan etiket biçimi: `"angle"` veya `"bracket_tr"`. |
+| `keep_legal_form` | `bool` | Uygulanan değer. |
+| `health_data` | `bool` | Uygulanan değer. |
+| `llm_review` | `dict \| None` | `llm_review=True` istendiyse durum özeti: `status`, `model`, `chunks`, `chunks_failed`, `elapsed_ms`, `added_spans`, `error`. Düz isim taşımaz. |
 
 ```python
 tagged = bb_mask.anonymize("Davacı Hasan Demirkol, TC 62601815964")
@@ -86,6 +90,31 @@ tagged.state    # None
 ```
 
 Etiket biçimi `<TIP_0>`. Aynı yüzey aynı numarayı alır. Model etiketi bozarsa (`<PERSON 0>`) onarım servistedir. Mahkeme ve kanun adları etiketlenmez.
+
+### Seçenekler
+
+Dört anonymize çağrısı (`anonymize`, `anonymize_file`, `anonymize_documents`, `anonymize_path`), async kardeşleri ve `session()` aynı isimli parametreleri alır. Yalnız isimle verilir. Hepsi kapalı başlar; servis kendi varsayılanına düşmez.
+
+| Parametre | Varsayılan | Etki |
+|---|---|---|
+| `placeholder_style` | `"angle"` | `"angle"` → `<PERSON_0>`. `"bracket_tr"` → `[KİŞİ_1]`, `[ŞİRKET_1]`; 1'den başlar. Başka değer istek gitmeden `BBError(400)`. |
+| `keep_legal_form` | `False` | `True` → şirket türü eki etiketin dışında kalır: `[ŞİRKET_1] A.Ş.`, `<ORGANIZATION_0> Ltd. Şti.` |
+| `health_data` | `False` | `True` → KVKK m.6 sağlık verisi de etiketlenir: tanı, ilaç, tahlil, kan grubu, hasta no, sağlık kurumu. |
+| `llm_review` | `False` | `True` → kuralların kaçırdığı kişi, şirket, adres ve kimlikler bir LLM ile ikinci kez aranır. Model geçici anonim metni görür. Servis katmanı kapalıysa hata değildir; `Tagged.llm_review["status"]` bunu söyler. |
+
+```python
+tagged = bb_mask.anonymize(
+    "Davalı Kaya İnşaat A.Ş. çalışanı Ali Kaya, tanı: diyabet",
+    placeholder_style="bracket_tr",
+    keep_legal_form=True,
+    health_data=True,
+    llm_review=True,
+)
+tagged.text        # "Davalı [ŞİRKET_1] A.Ş. çalışanı [KİŞİ_1], tanı: [TANI_1]"
+tagged.llm_review  # {"status": "ok", "model": "qwen/qwen3.8-27b", "added_spans": 0, ...}
+```
+
+`state` ve `get_map` sözlüğü biçimden bağımsız kanonik etiket taşır (`<PERSON_0>`). `restore` iki biçimi de açar.
 
 ### `state` / `get_map` sözlüğü
 
@@ -108,7 +137,7 @@ Ağ hatası da `BBError` olur; `httpx` istisnası dışarı sızmaz.
 
 | Kod | Anlam |
 |---|---|
-| 400 | Boş metin, 1–3 dışı dosya sayısı, oturumda anonymize yok, `doc_id` ve `state` ikisi de yok. |
+| 400 | Boş metin, 1–3 dışı dosya sayısı, geçersiz `placeholder_style`, oturumda anonymize yok, `doc_id` ve `state` ikisi de yok. |
 | 401 | `init` çağrılmadı, anahtar boş veya tanınmıyor. |
 | 402 | Bakiye yok. Anonimleştirme servise gitmez. |
 | 404 | Harita yok. Silinmiş, `once=True` ile okunmuş, başka çalışma alanının veya servis tutmuyordur. |
@@ -132,6 +161,7 @@ Ağ hatası da `BBError` olur; `httpx` istisnası dışarı sızmaz.
 | `restore(model_metni)` | `str` |
 | `close()` | `None`. Blok bitince kendiliğinden çağrılır. |
 | `persist` | `bool`. Kurgu 1 ise `True`. Oturumda sabittir. |
+| `options` | `dict`. `session(...)` içine verilen seçenekler. Her anonymize çağrısına gider. |
 
 `restore` burada yalnız model metnini alır. Anonymize olmadan çağrılırsa `BBError(400)`. Blok bitince `close` çalışır: `persist=True` ise tutulan her `doc_id` silinir, `persist=False` ise state düşer ve servise silme gitmez.
 
@@ -229,9 +259,9 @@ Adlar durur: `complete`, `complete_file`, `complete_documents`, `acomplete`. HTT
 Beş fonksiyon vardır. İmzalar senkron kardeşleriyle aynıdır. HTTP işi bir thread’de yürür. `init` bunlarda da gerekir.
 
 ```python
-aanonymize(text, persist=True) -> Tagged
-aanonymize_file(path, persist=True) -> Tagged
-aanonymize_documents(paths, persist=True) -> Tagged
+aanonymize(text, persist=True, *, <seçenekler>) -> Tagged
+aanonymize_file(path, persist=True, *, <seçenekler>) -> Tagged
+aanonymize_documents(paths, persist=True, *, <seçenekler>) -> Tagged
 arestore(doc_id_or_state, model_text) -> str
 acomplete(text) -> str
 ```
@@ -251,21 +281,30 @@ Modül fonksiyonları `init` ister. `BBAnonym` metotları kurucudaki anahtarı k
 
 ```python
 init(api_key: str, base_url: str = "http://127.0.0.1:8081", timeout: float = 120) -> BBAnonym
-anonymize(text: str, persist: bool = True) -> Tagged
-anonymize_file(path: str | Path, persist: bool = True) -> Tagged
-anonymize_documents(paths: list[str | Path], persist: bool = True) -> Tagged
+anonymize(text: str, persist: bool = True, *, <seçenekler>) -> Tagged
+anonymize_file(path: str | Path, persist: bool = True, *, <seçenekler>) -> Tagged
+anonymize_documents(paths: list[str | Path], persist: bool = True, *, <seçenekler>) -> Tagged
 restore(doc_id_or_state: str | dict, model_text: str) -> str
 get_map(doc_id: str, once: bool = False) -> dict
 delete(doc_id: str) -> bool
-session(persist: bool = True)  # with ile MaskSession
+session(persist: bool = True, *, <seçenekler>)  # with ile MaskSession
 complete(text: str) -> str
 complete_file(path: str | Path) -> str
 complete_documents(paths: list[str | Path]) -> str
-aanonymize(text: str, persist: bool = True) -> Tagged
-aanonymize_file(path: str | Path, persist: bool = True) -> Tagged
-aanonymize_documents(paths: list[str | Path], persist: bool = True) -> Tagged
+aanonymize(text: str, persist: bool = True, *, <seçenekler>) -> Tagged
+aanonymize_file(path: str | Path, persist: bool = True, *, <seçenekler>) -> Tagged
+aanonymize_documents(paths: list[str | Path], persist: bool = True, *, <seçenekler>) -> Tagged
 arestore(doc_id_or_state: str | dict, model_text: str) -> str
 acomplete(text: str) -> str
+```
+
+`<seçenekler>` yalnız isimle verilen dört parametredir; imzada açıkça yazılıdır, editör tamamlar, `help(bb_mask.anonymize)` açıklar:
+
+```python
+placeholder_style: Literal["angle", "bracket_tr"] = "angle",
+keep_legal_form: bool = False,
+health_data: bool = False,
+llm_review: bool = False,
 ```
 
 `persist=True` haritayı serviste tutar, `Tagged.doc_id` dolar. `persist=False` haritayı yazmaz, `Tagged.state` dolar, `doc_id` `None` olur.
@@ -286,10 +325,10 @@ acomplete(text: str) -> str
 
 ```python
 BBAnonym(base_url: str, token: str, timeout: float = 120)
-anonymize(text: str, persist: bool = True) -> Tagged
-anonymize_file(filename: str, content: bytes, persist: bool = True) -> Tagged
-anonymize_path(path: str | Path, persist: bool = True) -> Tagged
-anonymize_documents(paths: list[str | Path], persist: bool = True) -> Tagged
+anonymize(text: str, persist: bool = True, *, <seçenekler>) -> Tagged
+anonymize_file(filename: str, content: bytes, persist: bool = True, *, <seçenekler>) -> Tagged
+anonymize_path(path: str | Path, persist: bool = True, *, <seçenekler>) -> Tagged
+anonymize_documents(paths: list[str | Path], persist: bool = True, *, <seçenekler>) -> Tagged
 restore(doc_id_or_state: str | dict, model_text: str) -> str
 get_map(doc_id: str, once: bool = False) -> dict
 delete(doc_id: str) -> bool
@@ -302,7 +341,7 @@ complete_documents(paths: list[str | Path]) -> str
 
 ### `MaskSession`
 
-Kurucu dışarıdan çağrılmaz. `persist` oturum açılırken verilir, metotlara tekrar geçilmez.
+Kurucu dışarıdan çağrılmaz. `persist` ve seçenekler oturum açılırken verilir, metotlara tekrar geçilmez: `bb_mask.session(placeholder_style="bracket_tr", llm_review=True)`.
 
 ```python
 anonymize(text: str) -> Tagged

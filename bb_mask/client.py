@@ -11,13 +11,16 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 from urllib.parse import quote
 
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8081"
 _KURGU0 = "Bu uç henüz açık değil."
+
+PlaceholderStyle = Literal["angle", "bracket_tr"]
+PLACEHOLDER_STYLES = ("angle", "bracket_tr")
 
 
 class BBError(RuntimeError):
@@ -36,6 +39,33 @@ class Tagged:
     entities_found: dict = field(default_factory=dict)
     balance_credits: str | None = None
     request_id: str | None = None
+    placeholder_style: str = "angle"
+    keep_legal_form: bool = False
+    health_data: bool = False
+    llm_review: dict | None = None
+
+
+def _options(
+    placeholder_style: PlaceholderStyle,
+    keep_legal_form: bool,
+    health_data: bool,
+    llm_review: bool,
+) -> dict:
+    if placeholder_style not in PLACEHOLDER_STYLES:
+        raise BBError(400, "placeholder_style angle veya bracket_tr olmalı")
+    return {
+        "placeholder_style": placeholder_style,
+        "keep_legal_form": bool(keep_legal_form),
+        "health_data": bool(health_data),
+        "llm_review": bool(llm_review),
+    }
+
+
+def _form(persist: bool, options: dict) -> dict:
+    data = {"persist": str(persist).lower()}
+    for key, value in options.items():
+        data[key] = str(value).lower() if isinstance(value, bool) else value
+    return data
 
 
 class BBAnonym:
@@ -86,38 +116,96 @@ class BBAnonym:
             entities_found=body.get("entities_found") or {},
             balance_credits=body.get("balance_credits"),
             request_id=body.get("_request_id"),
+            placeholder_style=body.get("placeholder_style") or "angle",
+            keep_legal_form=bool(body.get("keep_legal_form")),
+            health_data=bool(body.get("health_data")),
+            llm_review=body.get("llm_review"),
         )
 
-    def anonymize(self, text: str, persist: bool = True) -> Tagged:
-        response = self._send("POST", "/v1/anonymize", json={"text": text, "persist": persist})
+    def anonymize(
+        self,
+        text: str,
+        persist: bool = True,
+        *,
+        placeholder_style: PlaceholderStyle = "angle",
+        keep_legal_form: bool = False,
+        health_data: bool = False,
+        llm_review: bool = False,
+    ) -> Tagged:
+        """Metni anonimleştirir. 1 kredi.
+
+        persist: True → harita serviste, Tagged.doc_id dolu. False → Tagged.state dolu.
+        placeholder_style: "angle" → <PERSON_0>. "bracket_tr" → [KİŞİ_1]. Başka değer BBError(400).
+        keep_legal_form: True → şirket türü eki etiketin dışında: [ŞİRKET_1] A.Ş.
+        health_data: True → tanı, ilaç, tahlil, kan grubu gibi sağlık verisi de etiketlenir.
+        llm_review: True → kuralların kaçırdıkları LLM ile ikinci kez aranır. Durum Tagged.llm_review.
+        """
+        options = _options(placeholder_style, keep_legal_form, health_data, llm_review)
+        response = self._send("POST", "/v1/anonymize", json={"text": text, "persist": persist, **options})
         return self._tagged(self._parse(response), persist)
 
-    def anonymize_file(self, filename: str, content: bytes, persist: bool = True) -> Tagged:
+    def anonymize_file(
+        self,
+        filename: str,
+        content: bytes,
+        persist: bool = True,
+        *,
+        placeholder_style: PlaceholderStyle = "angle",
+        keep_legal_form: bool = False,
+        health_data: bool = False,
+        llm_review: bool = False,
+    ) -> Tagged:
+        """Bayttan tek dosya (.txt, .pdf, .docx). 1 kredi. Seçenekler anonymize ile aynı."""
+        options = _options(placeholder_style, keep_legal_form, health_data, llm_review)
         response = self._send(
             "POST",
             "/v1/anonymize/file",
-            data={"persist": str(persist).lower()},
+            data=_form(persist, options),
             files={"file": (filename, content, "application/octet-stream")},
         )
         return self._tagged(self._parse(response), persist)
 
-    def anonymize_path(self, path: str | Path, persist: bool = True) -> Tagged:
+    def anonymize_path(
+        self,
+        path: str | Path,
+        persist: bool = True,
+        *,
+        placeholder_style: PlaceholderStyle = "angle",
+        keep_legal_form: bool = False,
+        health_data: bool = False,
+        llm_review: bool = False,
+    ) -> Tagged:
+        """Yoldan tek dosya. 1 kredi. Seçenekler anonymize ile aynı."""
         file_path = Path(path)
-        return self.anonymize_file(file_path.name, file_path.read_bytes(), persist=persist)
+        return self.anonymize_file(
+            file_path.name,
+            file_path.read_bytes(),
+            persist,
+            placeholder_style=placeholder_style,
+            keep_legal_form=keep_legal_form,
+            health_data=health_data,
+            llm_review=llm_review,
+        )
 
-    def anonymize_documents(self, paths: list[str | Path], persist: bool = True) -> Tagged:
+    def anonymize_documents(
+        self,
+        paths: list[str | Path],
+        persist: bool = True,
+        *,
+        placeholder_style: PlaceholderStyle = "angle",
+        keep_legal_form: bool = False,
+        health_data: bool = False,
+        llm_review: bool = False,
+    ) -> Tagged:
+        """1–3 dosya, tek doc_id. 1 kredi. Seçenekler anonymize ile aynı."""
+        options = _options(placeholder_style, keep_legal_form, health_data, llm_review)
         if not 1 <= len(paths) <= 3:
             raise BBError(400, "Bir istekte 1–3 dosya")
         files = []
         for path in paths:
             file_path = Path(path)
             files.append(("files", (file_path.name, file_path.read_bytes(), "application/octet-stream")))
-        response = self._send(
-            "POST",
-            "/v1/anonymize/documents",
-            data={"persist": str(persist).lower()},
-            files=files,
-        )
+        response = self._send("POST", "/v1/anonymize/documents", data=_form(persist, options), files=files)
         return self._tagged(self._parse(response), persist)
 
     def restore(self, doc_id_or_state: str | dict, model_text: str) -> str:
@@ -149,11 +237,21 @@ class BBAnonym:
 
 class MaskSession:
     """Kurgu 4. persist=True ise harita bizde kalır ve çıkışta silinir.
-    persist=False ise state oturum nesnesindedir."""
+    persist=False ise state oturum nesnesindedir. Seçenekler oturum boyunca sabittir."""
 
-    def __init__(self, client: BBAnonym, persist: bool = True):
+    def __init__(
+        self,
+        client: BBAnonym,
+        persist: bool = True,
+        *,
+        placeholder_style: PlaceholderStyle = "angle",
+        keep_legal_form: bool = False,
+        health_data: bool = False,
+        llm_review: bool = False,
+    ):
         self._client = client
         self.persist = persist
+        self.options = _options(placeholder_style, keep_legal_form, health_data, llm_review)
         self._ids: list[str] = []
         self._doc_id: str | None = None
         self._state: dict | None = None
@@ -166,13 +264,13 @@ class MaskSession:
         return tagged
 
     def anonymize(self, text: str) -> Tagged:
-        return self._remember(self._client.anonymize(text, persist=self.persist))
+        return self._remember(self._client.anonymize(text, self.persist, **self.options))
 
     def anonymize_file(self, path: str | Path) -> Tagged:
-        return self._remember(self._client.anonymize_path(path, persist=self.persist))
+        return self._remember(self._client.anonymize_path(path, self.persist, **self.options))
 
     def anonymize_documents(self, paths: list[str | Path]) -> Tagged:
-        return self._remember(self._client.anonymize_documents(paths, persist=self.persist))
+        return self._remember(self._client.anonymize_documents(paths, self.persist, **self.options))
 
     def restore(self, model_text: str) -> str:
         if self.persist:
@@ -213,16 +311,71 @@ def _require() -> BBAnonym:
     return _current
 
 
-def anonymize(text: str, persist: bool = True) -> Tagged:
-    return _require().anonymize(text, persist=persist)
+def anonymize(
+    text: str,
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """Metni anonimleştirir. 1 kredi. init gerekir.
+
+    persist: True → harita serviste, Tagged.doc_id dolu. False → Tagged.state dolu.
+    placeholder_style: "angle" → <PERSON_0>. "bracket_tr" → [KİŞİ_1]. Başka değer BBError(400).
+    keep_legal_form: True → şirket türü eki etiketin dışında: [ŞİRKET_1] A.Ş.
+    health_data: True → tanı, ilaç, tahlil, kan grubu gibi sağlık verisi de etiketlenir.
+    llm_review: True → kuralların kaçırdıkları LLM ile ikinci kez aranır. Durum Tagged.llm_review.
+    """
+    return _require().anonymize(
+        text,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
-def anonymize_file(path: str | Path, persist: bool = True) -> Tagged:
-    return _require().anonymize_path(path, persist=persist)
+def anonymize_file(
+    path: str | Path,
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """Yoldan tek dosya (.txt, .pdf, .docx). 1 kredi. Seçenekler anonymize ile aynı."""
+    return _require().anonymize_path(
+        path,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
-def anonymize_documents(paths: list[str | Path], persist: bool = True) -> Tagged:
-    return _require().anonymize_documents(paths, persist=persist)
+def anonymize_documents(
+    paths: list[str | Path],
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """1–3 dosya, tek doc_id. 1 kredi. Seçenekler anonymize ile aynı."""
+    return _require().anonymize_documents(
+        paths,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
 def restore(doc_id_or_state: str | dict, model_text: str) -> str:
@@ -250,24 +403,90 @@ def complete_documents(paths: list[str | Path]) -> str:
 
 
 @contextmanager
-def session(persist: bool = True) -> Iterator[MaskSession]:
-    handle = MaskSession(_require(), persist=persist)
+def session(
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Iterator[MaskSession]:
+    """with ile MaskSession. Seçenekler anonymize ile aynı; oturumdaki her çağrıya gider."""
+    handle = MaskSession(
+        _require(),
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
     try:
         yield handle
     finally:
         handle.close()
 
 
-async def aanonymize(text: str, persist: bool = True) -> Tagged:
-    return await asyncio.to_thread(anonymize, text, persist)
+async def aanonymize(
+    text: str,
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """anonymize'ın async karşılığı. Seçenekler aynı."""
+    return await asyncio.to_thread(
+        anonymize,
+        text,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
-async def aanonymize_file(path: str | Path, persist: bool = True) -> Tagged:
-    return await asyncio.to_thread(anonymize_file, path, persist)
+async def aanonymize_file(
+    path: str | Path,
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """anonymize_file'ın async karşılığı. Seçenekler aynı."""
+    return await asyncio.to_thread(
+        anonymize_file,
+        path,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
-async def aanonymize_documents(paths: list[str | Path], persist: bool = True) -> Tagged:
-    return await asyncio.to_thread(anonymize_documents, paths, persist)
+async def aanonymize_documents(
+    paths: list[str | Path],
+    persist: bool = True,
+    *,
+    placeholder_style: PlaceholderStyle = "angle",
+    keep_legal_form: bool = False,
+    health_data: bool = False,
+    llm_review: bool = False,
+) -> Tagged:
+    """anonymize_documents'ın async karşılığı. Seçenekler aynı."""
+    return await asyncio.to_thread(
+        anonymize_documents,
+        paths,
+        persist,
+        placeholder_style=placeholder_style,
+        keep_legal_form=keep_legal_form,
+        health_data=health_data,
+        llm_review=llm_review,
+    )
 
 
 async def arestore(doc_id_or_state: str | dict, model_text: str) -> str:
@@ -276,3 +495,4 @@ async def arestore(doc_id_or_state: str | dict, model_text: str) -> str:
 
 async def acomplete(text: str) -> str:
     return await asyncio.to_thread(complete, text)
+
